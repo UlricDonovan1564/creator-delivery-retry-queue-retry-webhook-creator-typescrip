@@ -1,0 +1,23 @@
+{
+  "name": "creator-delivery-retry-queue",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/creator_delivery.ts serve",
+    "register": "tsx src/creator_delivery.ts register",
+    "history": "tsx src/creator_delivery.ts history",
+    "worker": "tsx src/creator_delivery.ts worker",
+    "demo": "tsx src/creator_delivery.ts demo",
+    "test": "tsx --test test/delivery_decision.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
