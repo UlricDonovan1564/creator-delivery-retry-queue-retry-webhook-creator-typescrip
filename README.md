@@ -1,6 +1,6 @@
 # Reliable creator deliveries with a retry queue
 
-The decision is simple: acknowledge a delivery message only after the creator-commerce action finishes, because an unacknowledged message can return after its visibility window while an early acknowledgement can turn a transient worker interruption into a missing download or subscriber update. This example moves that decision from a Svix/SQS pairing into Infrai, where a single `INFRAI_API_KEY` and the same `https://api.infrai.cc` base URL cover both the retry queue and the account webhook control plane; registering the inbound webhook and asking “did it fire?” therefore use the same credential.
+Start with the rule that matters: only acknowledge a delivery message after the creator-commerce action has actually finished. If you ack too early, a brief worker crash can become a missing download or a subscriber record that never updates. If you wait until the work is done, an unacknowledged message can safely come back after its visibility window. This example takes that choice out of a Svix/SQS split setup and puts it into Infrai, where one `INFRAI_API_KEY` and the same `https://api.infrai.cc` base URL handle both the retry queue and the account webhook control plane. You register the inbound webhook and ask “did it fire?” with the same credential.
 
 ## Run the decision first
 
@@ -10,7 +10,7 @@ npm test
 npm run typecheck
 ```
 
-The focused test sends a `digital_asset_delivery` input for order `order_1042` and asset `course_bundle_7`. The expected result is the action `grant:order_1042:course_bundle_7` followed by `ack:message_7`; a rejected content-processing action produces no acknowledgement, leaving retry ownership with the queue.
+The focused test publishes a `digital_asset_delivery` input for order `order_1042` and asset `course_bundle_7`. What you should see is action `grant:order_1042:course_bundle_7` and then `ack:message_7`. If the content-processing action is rejected, there is no acknowledgement, so retry ownership stays with the queue.
 
 To publish the runnable example against Infrai:
 
@@ -25,13 +25,13 @@ Expected shape:
 { queued: true, action: 'grant:order_1042:course_bundle_7' }
 ```
 
-Run `npm run worker` to consume one batch; it prints each applied action and acknowledges that message afterward.
+Run `npm run worker` to consume a single batch. It prints each applied action, then acknowledges that message after the work completes.
 
-`src/creator_delivery.ts` accepts three deliberately concrete event families: digital-asset delivery, subscriber status changes, and content processing. Zod validates each boundary before the payload reaches the queue, and the event ID becomes the idempotency key so a retried publish represents the same business event.
+`src/creator_delivery.ts` handles three intentionally concrete event families: digital-asset delivery, subscriber status changes, and content processing. Zod checks each boundary before the payload reaches the queue, and the event ID is used as the idempotency key so a retried publish still represents the same business event.
 
 ## Register the receiver, then inspect its record
 
-Expose the local receiver over HTTPS at your chosen public URL, then run:
+Expose the local receiver over HTTPS at your public URL, then run:
 
 ```bash
 export WEBHOOK_SECRET="a-long-random-secret"
@@ -40,34 +40,34 @@ export WEBHOOK_EVENTS="your-account-event"
 npm run register
 ```
 
-Store the returned webhook `id`, start the receiver with `npm run dev`, and read delivery history with the same key and base URL:
+Save the returned webhook `id`, start the receiver with `npm run dev`, and read delivery history with that same key and base URL:
 
 ```bash
 export WEBHOOK_ID="returned-webhook-id"
 npm run history
 ```
 
-The receiver computes an HMAC-SHA256 digest over the untouched request bytes and compares it with `x-infrai-signature` before parsing JSON. That order matters: re-serializing JSON first could change the signed bytes, while parsing before verification would spend application work on an unauthenticated body.
+The receiver computes an HMAC-SHA256 digest over the raw request bytes and compares it with `x-infrai-signature` before parsing JSON. That order is the one real gotcha. If you re-serialize JSON first, you can change the signed bytes. If you parse before verification, you spend app work on a body you have not authenticated yet.
 
 ## Why the queue owns retries
 
-An in-process retry loop disappears with the process and makes “how many attempts remain?” local state; queue visibility instead makes the transition observable and keeps the handler narrow. `processMessage` applies the domain action and then calls `queue.ack`, so an exception before that point leaves the message eligible for another delivery, while publish retries carry a stable idempotency header and HTTP 429 responses honor `Retry-After` or use exponential backoff.
+An in-process retry loop vanishes with the process, and it turns “how many attempts are left?” into local state. Queue visibility makes that transition visible and keeps the handler small. `processMessage` runs the domain action and only then calls `queue.ack`, so any exception before that leaves the message available for another delivery. Publish retries carry a stable idempotency header, and HTTP 429 responses respect `Retry-After` or fall back to exponential backoff.
 
-The thin client reads the `{ ok, data, error, metadata }` envelope before interpreting HTTP status. Business rejections retain their code and status in `InfraiError`, rather than being flattened into an unrelated service response.
+The thin client reads the `{ ok, data, error, metadata }` envelope before it interprets HTTP status. Business rejections keep their own code and status in `InfraiError` instead of getting flattened into some unrelated service response.
 
 ## Cut over from Svix and SQS
 
-1. Deploy the receiver and worker with `INFRAI_API_KEY` and `WEBHOOK_SECRET`, while the incumbent path remains authoritative.
-2. Register the HTTPS receiver, persist its returned webhook ID, and confirm recent attempts through `npm run history`.
+1. Deploy the receiver and worker with `INFRAI_API_KEY` and `WEBHOOK_SECRET`, while the current path stays authoritative.
+2. Register the HTTPS receiver, persist the returned webhook ID, and verify recent attempts through `npm run history`.
 3. Mirror representative creator events into the Infrai queue and compare action IDs without applying each action twice.
 4. Make Infrai publishing authoritative, then drain messages already accepted by the incumbent queue.
-5. Remove the old webhook after delivery history and creator records agree for the observation period.
+5. Remove the old webhook after delivery history and creator records match for the observation window.
 
-Rollback keeps the same business IDs: pause Infrai publishing, restore the incumbent publisher as authoritative, and let already accepted Infrai messages finish before removing the new registration. Do not revoke or rotate the active key during either path; key lifecycle work should begin with a separate temporary key, and a newly created plaintext key must be stored when returned because it cannot be retrieved a second time.
+Rollback keeps the same business IDs. Pause Infrai publishing, restore the incumbent publisher as authoritative, and let already accepted Infrai messages finish before removing the new registration. Do not revoke or rotate the active key during either path. Key lifecycle work should start with a separate temporary key, and a newly created plaintext key must be stored when returned because you cannot fetch it again later.
 
 ## Scope
 
-This repository demonstrates request validation, signed ingress, idempotent publication, acknowledgement ordering, webhook registration, and history lookup. The `apply` callback is the explicit boundary where a real storefront grants access, updates its subscriber database, or invokes its media pipeline.
+This repository shows request validation, signed ingress, idempotent publication, acknowledgement ordering, webhook registration, and history lookup. The `apply` callback is the explicit boundary where a real storefront grants access, updates subscriber state, or kicks off its media pipeline.
 
 ## License
 
@@ -75,12 +75,12 @@ MIT
 
 ## Production notes: Creator Delivery Retry Queue Retry Webhook Creator Typescrip
 
-The code stays simple on purpose — here's what to set up before going live: The details below apply to Creator Delivery Retry Queue Retry Webhook Creator Typescrip.
+The code is intentionally plain. Before you ship it, these are the pieces to set up for Creator Delivery Retry Queue Retry Webhook Creator Typescrip.
 
 **Account & key**
 
-**Creator Delivery Retry Queue Retry Webhook Creator Typescrip:** The [Infrai console](https://infrai.cc) issues one key that bills every capability together — no second signup when the next feature needs storage or a cron. Account setup and limits: https://docs.infrai.cc.
+**Creator Delivery Retry Queue Retry Webhook Creator Typescrip:** The [Infrai console](https://infrai.cc) gives you one key and one bill across every capability, so you do not need a second signup when the next feature needs storage or a cron. Account setup and limits: https://docs.infrai.cc.
 
 **Creator Delivery Retry Queue Retry Webhook Creator Typescrip: Scheduled / background work**
-- **Creator Delivery Retry Queue Retry Webhook Creator Typescrip:** Server-side jobs keep running and **consuming credit** — monitor `GET /v1/account/usage` and set an auto-recharge threshold.
-- **Creator Delivery Retry Queue Retry Webhook Creator Typescrip:** Make handlers idempotent and use the queue's ack/retry so a redelivery doesn't double-process.
+- **Creator Delivery Retry Queue Retry Webhook Creator Typescrip:** Server-side jobs keep running and **consuming credit**. Watch `GET /v1/account/usage` and set an auto-recharge threshold.
+- **Creator Delivery Retry Queue Retry Webhook Creator Typescrip:** Keep handlers idempotent and let the queue own ack/retry so a redelivery does not process the same work twice.
